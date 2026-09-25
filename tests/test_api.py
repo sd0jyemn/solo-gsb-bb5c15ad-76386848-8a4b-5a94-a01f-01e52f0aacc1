@@ -138,3 +138,150 @@ def test_csv_export():
     assert "状态,代价,对白稿行号" in text
     assert "对位" in text and "缺字幕" in text and "缺对白稿" in text
     assert "00:00:01,000" in text
+
+
+# ---------------- 人工锚点 ----------------
+
+
+def _align_with_anchors(anchors):
+    resp = client.post(
+        "/api/align", json={"script": SCRIPT, "srt": SRT, "anchors": anchors}
+    )
+    return resp
+
+
+def test_no_anchors_unchanged():
+    # 未提供锚点时结果与原来一致，且所有行 anchor=False
+    data = _align()
+    assert data["summary"]["anchors"] == 0
+    assert all(r["anchor"] is False for r in data["rows"])
+
+
+def test_anchor_forces_pairing():
+    # 对白稿第 3 行与字幕块第 4 块文本毫不相干，无锚点时各自缺项；
+    # 锚定后必须强制对位，原先的对位被推成双侧缺项
+    resp = _align_with_anchors([{"script_line": 3, "srt_block": 4}])
+    assert resp.status_code == 200
+    data = resp.json()
+    s = data["summary"]
+    assert s["anchors"] == 1
+
+    anchor_rows = [r for r in data["rows"] if r["anchor"]]
+    assert len(anchor_rows) == 1
+    row = anchor_rows[0]
+    assert row["status"] == "match"
+    assert row["script_index"] == 3
+    assert row["srt_index"] == 4
+    assert row["script_text"] == "这一句只出现在对白稿里。"
+    assert row["srt_text"] == "这是一条多余的字幕"
+    assert row["cost"] > 0.5  # 文本差异很大，代价如实记录但仍强制对位
+
+    # 被锚点“挤开”的原对位成为双侧缺项
+    statuses = [r["status"] for r in data["rows"]]
+    assert statuses == [
+        "match", "match", "missing_script", "match",
+        "missing_srt", "match", "match",
+    ]
+    assert s["match"] == 5
+    assert s["missing_script"] == 1
+    assert s["missing_srt"] == 1
+
+
+def test_anchor_multiple_segments():
+    # 两个锚点把序列切成三段，段间仍按最小代价对齐
+    resp = _align_with_anchors(
+        [
+            {"script_line": 1, "srt_block": 1},
+            {"script_line": 6, "srt_block": 6},
+        ]
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["summary"]["anchors"] == 2
+    anchor_pairs = [
+        (r["script_index"], r["srt_index"]) for r in data["rows"] if r["anchor"]
+    ]
+    assert anchor_pairs == [(1, 1), (6, 6)]
+    # 中间段的缺项照常出现
+    statuses = [r["status"] for r in data["rows"]]
+    assert "missing_script" in statuses and "missing_srt" in statuses
+
+
+def test_anchor_out_of_range():
+    resp = _align_with_anchors([{"script_line": 99, "srt_block": 1}])
+    assert resp.status_code == 400
+    assert "超出范围" in resp.json()["detail"]
+    resp = _align_with_anchors([{"script_line": 1, "srt_block": 0}])
+    assert resp.status_code == 400
+    assert "超出范围" in resp.json()["detail"]
+    resp = _align_with_anchors([{"script_line": 1, "srt_block": 7}])
+    assert resp.status_code == 400
+    assert "字幕块" in resp.json()["detail"]
+
+
+def test_anchor_duplicate_rejected():
+    resp = _align_with_anchors(
+        [
+            {"script_line": 1, "srt_block": 1},
+            {"script_line": 1, "srt_block": 1},
+        ]
+    )
+    assert resp.status_code == 400
+    assert "重复" in resp.json()["detail"]
+
+
+def test_anchor_same_side_reused_rejected():
+    # 同一行/同一块被两个锚点使用
+    resp = _align_with_anchors(
+        [{"script_line": 1, "srt_block": 1}, {"script_line": 1, "srt_block": 2}]
+    )
+    assert resp.status_code == 400
+    assert "重复锚定" in resp.json()["detail"]
+    resp = _align_with_anchors(
+        [{"script_line": 1, "srt_block": 1}, {"script_line": 2, "srt_block": 1}]
+    )
+    assert resp.status_code == 400
+    assert "重复锚定" in resp.json()["detail"]
+
+
+def test_anchor_crossing_rejected():
+    resp = _align_with_anchors(
+        [{"script_line": 1, "srt_block": 2}, {"script_line": 2, "srt_block": 1}]
+    )
+    assert resp.status_code == 400
+    assert "交叉" in resp.json()["detail"]
+
+
+def test_anchor_with_empty_side_rejected():
+    resp = client.post(
+        "/api/align",
+        json={"script": "", "srt": SRT, "anchors": [{"script_line": 1, "srt_block": 1}]},
+    )
+    assert resp.status_code == 400
+    assert "锚点" in resp.json()["detail"]
+
+
+def test_anchor_csv_export():
+    resp = client.post(
+        "/api/export.csv",
+        json={"script": SCRIPT, "srt": SRT, "anchors": [{"script_line": 3, "srt_block": 4}]},
+    )
+    assert resp.status_code == 200
+    text = resp.content.decode("utf-8-sig")
+    header = text.splitlines()[0]
+    assert header.endswith(",锚点")
+    # 锚点行末列标“是”，其余行末列为空
+    lines = text.splitlines()[1:]
+    marked = [ln for ln in lines if ln.endswith(",是")]
+    assert len(marked) == 1
+    assert "这一句只出现在对白稿里。" in marked[0]
+    assert "这是一条多余的字幕" in marked[0]
+
+
+def test_anchor_csv_export_invalid_anchors():
+    resp = client.post(
+        "/api/export.csv",
+        json={"script": SCRIPT, "srt": SRT, "anchors": [{"script_line": 2, "srt_block": 1}, {"script_line": 1, "srt_block": 2}]},
+    )
+    assert resp.status_code == 400
+    assert "交叉" in resp.json()["detail"]

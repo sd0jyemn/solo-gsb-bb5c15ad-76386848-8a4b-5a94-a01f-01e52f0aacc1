@@ -1,7 +1,7 @@
 """算法与解析层的直接单元测试，不依赖网络框架：python -m tests.test_alignment"""
 import sys
 
-from app.alignment import GAP_COST, align
+from app.alignment import GAP_COST, align, align_with_anchors
 from app.parsers import parse_script, parse_srt
 from app.textnorm import normalize_text, normalized_distance
 
@@ -106,6 +106,51 @@ def test_script_parse():
     items = parse_script(" 第一行 \n\n   \n第二行\n")
     assert [it.raw_text for it in items] == ["第一行", "第二行"]
     assert [it.index for it in items] == [1, 2]
+
+
+def test_anchor_forces_match_despite_distance():
+    # 锚点两侧文本完全不同（代价 1.0 > 2*gap），无锚点时必然各自缺项
+    a = [normalize_text(x) for x in ["aaaaaaaaaa", "共同的句子"]]
+    b = [normalize_text(x) for x in ["bbbbbbbbbb", "共同的句子"]]
+    ops = align_with_anchors(a, b, [(0, 0)])
+    matches = [(i, j) for op, _, i, j in ops if op == "match"]
+    assert (0, 0) in matches            # 强制对位，绝不跳过
+    assert (1, 1) in matches            # 锚点之后的段仍正常对齐
+    anchor_cost = next(c for op, c, i, j in ops if (i, j) == (0, 0))
+    assert anchor_cost == 1.0           # 代价如实记录
+    # 无锚点时同一输入应为双侧缺项
+    assert {op[0] for op in align(a[:1], b[:1])} == {"gap_a", "gap_b"}
+
+
+def test_anchor_segments_keep_gaps():
+    # 两个锚点之间的段沿用最小代价对齐，段内缺项照常出现
+    a = [normalize_text(x) for x in ["开头", "稿里多一句", "中间", "结尾"]]
+    b = [normalize_text(x) for x in ["开头", "中间", "字幕多一条", "结尾"]]
+    ops = align_with_anchors(a, b, [(0, 0), (3, 3)])
+    kinds = [op[0] for op in ops]
+    assert kinds.count("match") == 3    # 两锚点 + 段内“中间”对位
+    assert ("gap_a", GAP_COST, 1, None) in ops   # 段内 a 侧缺项保留
+    assert ("gap_b", GAP_COST, None, 2) in ops   # 段内 b 侧缺项保留
+    # 全序列单调：match 的两侧索引严格递增
+    mi = [i for op, _, i, j in ops if op == "match"]
+    mj = [j for op, _, i, j in ops if op == "match"]
+    assert mi == sorted(mi) and len(set(mi)) == len(mi)
+    assert mj == sorted(mj) and len(set(mj)) == len(mj)
+
+
+def test_anchor_empty_list_matches_plain_align():
+    a = [normalize_text(x) for x in ["第一句", "第二句"]]
+    b = [normalize_text(x) for x in ["第一句", "第二句", "多一条"]]
+    assert align_with_anchors(a, b, []) == align(a, b)
+
+
+def test_anchor_adjacent_and_boundary():
+    # 锚点相邻（中间段为空）且覆盖首尾的极端情形
+    a = [normalize_text(x) for x in ["一", "二", "三"]]
+    b = [normalize_text(x) for x in ["一", "二", "三"]]
+    ops = align_with_anchors(a, b, [(0, 0), (1, 1), (2, 2)])
+    assert [op[0] for op in ops] == ["match", "match", "match"]
+    assert [(i, j) for _, _, i, j in ops] == [(0, 0), (1, 1), (2, 2)]
 
 
 def run():

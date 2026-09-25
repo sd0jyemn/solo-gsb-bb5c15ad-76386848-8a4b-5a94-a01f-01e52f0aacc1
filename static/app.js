@@ -6,6 +6,7 @@ const els = {
   script: $("script"),
   srt: $("srt"),
   gap: $("gapCost"),
+  anchors: $("anchors"),
   alignBtn: $("alignBtn"),
   clearBtn: $("clearBtn"),
   status: $("status"),
@@ -60,6 +61,7 @@ $("sampleSrt").addEventListener("click", () => {
 els.clearBtn.addEventListener("click", () => {
   els.script.value = "";
   els.srt.value = "";
+  els.anchors.value = "";
   els.summary.classList.add("hidden");
   els.resultWrap.classList.add("hidden");
   setStatus("", false);
@@ -68,6 +70,25 @@ els.clearBtn.addEventListener("click", () => {
 function setStatus(msg, isError) {
   els.status.textContent = msg;
   els.status.classList.toggle("error", !!isError);
+}
+
+// 解析“行:块”锚点列表：支持全角冒号，多对之间用逗号/分号/空白分隔
+function parseAnchors(text) {
+  const cleaned = String(text || "").replace(/[：\s]/g, (c) =>
+    c === "：" ? ":" : ","
+  );
+  const tokens = cleaned.split(/[,;；、]+/).filter(Boolean);
+  const anchors = [];
+  for (const token of tokens) {
+    const m = /^(\d+):(\d+)$/.exec(token);
+    if (!m) {
+      throw new Error(
+        `锚点“${token}”格式不正确，应为“行:块”，如 3:4（多个用逗号分隔）`
+      );
+    }
+    anchors.push({ script_line: Number(m[1]), srt_block: Number(m[2]) });
+  }
+  return anchors;
 }
 
 function escapeHtml(s) {
@@ -100,20 +121,27 @@ function render(data) {
   $("totalCost").textContent = s.total_cost.toFixed(4);
   $("avgCost").textContent =
     s.avg_match_cost === null ? "-" : s.avg_match_cost.toFixed(4);
+  const chipAnchor = $("chipAnchor");
+  chipAnchor.classList.toggle("hidden", !s.anchors);
+  $("cntAnchor").textContent = s.anchors;
 
   const frag = document.createDocumentFragment();
   for (const r of data.rows) {
     const meta = STATUS_META[r.status];
     const tr = document.createElement("tr");
     tr.className = `row-${r.status}`;
+    if (r.anchor) tr.classList.add("row-anchor");
     const costText = r.status === "match"
       ? r.cost.toFixed(3)
       : `(${r.cost.toFixed(2)})`;
     const tc = r.start_tc
       ? `${escapeHtml(r.start_tc)} → ${escapeHtml(r.end_tc)}`
       : "";
+    const anchorBadge = r.anchor
+      ? ' <span class="badge badge-anchor" title="人工锚点：强制对位">⚓锚点</span>'
+      : "";
     tr.innerHTML = `
-      <td><span class="badge ${meta.badge}">${meta.label}</span></td>
+      <td><span class="badge ${meta.badge}">${meta.label}</span>${anchorBadge}</td>
       <td class="cell-num ${costClass(r.status, r.cost)}">${costText}</td>
       <td class="cell-idx">${r.script_index ?? ""}</td>
       <td class="cell-text">${escapeHtml(r.script_text)}</td>
@@ -133,7 +161,19 @@ async function align() {
     setStatus("跳过代价需为 0~1 之间的数字", true);
     return;
   }
-  lastRequest = { script: els.script.value, srt: els.srt.value, gap_cost: gap };
+  let anchors;
+  try {
+    anchors = parseAnchors(els.anchors.value);
+  } catch (e) {
+    setStatus(e.message, true);
+    return;
+  }
+  lastRequest = {
+    script: els.script.value,
+    srt: els.srt.value,
+    gap_cost: gap,
+    anchors,
+  };
 
   els.alignBtn.disabled = true;
   setStatus("对齐中……", false);

@@ -36,6 +36,10 @@
     <label class="gap-field">跳过单条代价
       <input type="number" id="gapCost" value="0.45" min="0" max="1" step="0.01">
     </label>
+    <label class="anchor-field">人工锚点（行:块，多个用逗号/空格分隔）
+      <input type="text" id="anchors" spellcheck="false"
+        placeholder="如 3:4, 8:9 —— 对白稿第3行强制对位第4个字幕块">
+    </label>
     <button type="button" id="alignBtn" class="primary">开始对齐</button>
     <button type="button" id="clearBtn" class="ghost">清空</button>
     <span id="status" class="status" role="status"></span>
@@ -45,6 +49,7 @@
     <span class="chip chip-match">对位 <b id="cntMatch">0</b></span>
     <span class="chip chip-missing-script">缺对白稿 <b id="cntMissingScript">0</b></span>
     <span class="chip chip-missing-srt">缺字幕 <b id="cntMissingSrt">0</b></span>
+    <span class="chip chip-anchor hidden" id="chipAnchor">锚点 <b id="cntAnchor">0</b></span>
     <span class="chip">总行数 <b id="cntTotal">0</b></span>
     <span class="chip">总代价 <b id="totalCost">0</b></span>
     <span class="chip">对位平均代价 <b id="avgCost">-</b></span>

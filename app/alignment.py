@@ -193,3 +193,56 @@ def align(
     if _HAVE_NUMPY:
         return _align_numpy(norms_a, norms_b, gap_cost)
     return _align_python(norms_a, norms_b, gap_cost)
+
+
+def _shift_ops(ops: Ops, off_a: int, off_b: int) -> Ops:
+    """把子段对齐结果的整体索引平移回全序列坐标。"""
+    shifted: Ops = []
+    for op, cost, i, j in ops:
+        shifted.append(
+            (
+                op,
+                cost,
+                i + off_a if i is not None else None,
+                j + off_b if j is not None else None,
+            )
+        )
+    return shifted
+
+
+def align_with_anchors(
+    norms_a: list[str],
+    norms_b: list[str],
+    anchors: list[tuple[int, int]],
+    gap_cost: float = GAP_COST,
+) -> Ops:
+    """带人工锚点的全局单调对齐。
+
+    ``anchors`` 为若干 ``(i, j)`` 强制配对（0 起始索引），调用方需保证
+    两列均严格递增。相邻锚点之间（含首尾两段）分别调用 :func:`align`
+    做最小代价单调对齐，锚点本身作为强制 match 拼接——即使两侧文本
+    差异很大也绝不跳过；锚点之外的条目仍允许出现双侧缺项。
+    """
+    ops: Ops = []
+    prev_i = prev_j = 0
+    for ai, bj in anchors:
+        ops.extend(
+            _shift_ops(
+                align(norms_a[prev_i:ai], norms_b[prev_j:bj], gap_cost),
+                prev_i,
+                prev_j,
+            )
+        )
+        # 强制配对：代价如实计算，仅供展示与统计，不影响“必须对位”
+        ops.append(
+            ("match", normalized_distance(norms_a[ai], norms_b[bj]), ai, bj)
+        )
+        prev_i, prev_j = ai + 1, bj + 1
+    ops.extend(
+        _shift_ops(
+            align(norms_a[prev_i:], norms_b[prev_j:], gap_cost),
+            prev_i,
+            prev_j,
+        )
+    )
+    return ops
