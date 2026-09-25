@@ -1,7 +1,12 @@
 """算法与解析层的直接单元测试，不依赖网络框架：python -m tests.test_alignment"""
 import sys
 
-from app.alignment import GAP_COST, align
+from app.alignment import (
+    GAP_COST,
+    align,
+    align_with_anchors,
+    normalize_anchors,
+)
 from app.parsers import parse_script, parse_srt
 from app.textnorm import normalize_text, normalized_distance
 
@@ -106,6 +111,74 @@ def test_script_parse():
     items = parse_script(" 第一行 \n\n   \n第二行\n")
     assert [it.raw_text for it in items] == ["第一行", "第二行"]
     assert [it.index for it in items] == [1, 2]
+
+
+def test_normalize_anchors_ok():
+    # 1 起始序位转 0 起始索引，严格递增通过
+    assert normalize_anchors([(1, 1), (3, 5), (6, 6)], 6, 6) == [
+        (0, 0),
+        (2, 4),
+        (5, 5),
+    ]
+    assert normalize_anchors([], 3, 3) == []
+
+
+def _expect_anchor_error(anchors, n=6, m=6):
+    try:
+        normalize_anchors(anchors, n, m)
+    except ValueError:
+        return
+    raise AssertionError(f"锚点 {anchors} 应当报错")
+
+
+def test_normalize_anchors_out_of_range():
+    _expect_anchor_error([(0, 1)])      # 序位从 1 开始
+    _expect_anchor_error([(1, 0)])
+    _expect_anchor_error([(7, 1)])      # 超过对白稿行数
+    _expect_anchor_error([(1, 7)])      # 超过 SRT 块数
+    _expect_anchor_error([(1, 1)], n=0, m=1)  # 一侧为空时任何锚点都越界
+
+
+def test_normalize_anchors_duplicate_and_crossing():
+    _expect_anchor_error([(2, 2), (2, 2)])   # 重复
+    _expect_anchor_error([(2, 3), (3, 2)])   # 交叉：块序位倒退
+    _expect_anchor_error([(3, 2), (2, 3)])   # 交叉：行序位倒退
+    _expect_anchor_error([(2, 2), (2, 5)])   # 行序位未严格递增
+    _expect_anchor_error([(2, 2), (5, 2)])   # 块序位未严格递增
+
+
+def test_align_with_anchors_forces_match():
+    # 文本完全不同（距离 1.0 > 2*0.45）也必须强制配对，不得跳过
+    a = [normalize_text(x) for x in ["aaaaaaaaaa", "中间句"]]
+    b = [normalize_text(x) for x in ["bbbbbbbbbb", "中间句"]]
+    ops = align_with_anchors(a, b, [(0, 0)])
+    assert ops[0] == ("anchor", 1.0, 0, 0)
+    assert ("match", 0.0, 1, 1) in ops
+    # 不加锚点时同样的两条会各自缺项
+    assert {op[0] for op in align(a[:1], b[:1])} == {"gap_a", "gap_b"}
+
+
+def test_align_with_anchors_segments():
+    # 锚点前后分段独立对齐，缺项照常出现，整体顺序单调
+    a = [normalize_text(x) for x in ["第一句", "稿里独有", "锚点句", "第四句"]]
+    b = [normalize_text(x) for x in ["第一句", "差异很大", "字幕独有", "第四句"]]
+    ops = align_with_anchors(a, b, [(2, 1)])
+    kinds = [op[0] for op in ops]
+    assert kinds == ["match", "gap_a", "anchor", "gap_b", "match"]
+    assert ops[2][2:] == (2, 1)
+    # 锚点行代价按实际距离计算（差异很大 → 1.0）
+    assert ops[2][1] == 1.0
+
+
+def test_align_with_anchors_multiple():
+    # 多个锚点把序列切成三段，锚点按顺序拼入
+    a = [normalize_text(x) for x in ["甲一", "甲二", "甲三", "甲四"]]
+    b = [normalize_text(x) for x in ["乙一", "乙二", "乙三", "乙四"]]
+    ops = align_with_anchors(a, b, [(0, 0), (3, 3)])
+    kinds = [op[0] for op in ops]
+    assert kinds[0] == "anchor" and kinds[-1] == "anchor"
+    assert [op[2] for op in ops if op[0] == "anchor"] == [0, 3]
+    assert [op[3] for op in ops if op[0] == "anchor"] == [0, 3]
 
 
 def run():

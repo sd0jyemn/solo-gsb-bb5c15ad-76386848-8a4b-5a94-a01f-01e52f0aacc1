@@ -6,6 +6,7 @@ const els = {
   script: $("script"),
   srt: $("srt"),
   gap: $("gapCost"),
+  anchors: $("anchors"),
   alignBtn: $("alignBtn"),
   clearBtn: $("clearBtn"),
   status: $("status"),
@@ -60,6 +61,7 @@ $("sampleSrt").addEventListener("click", () => {
 els.clearBtn.addEventListener("click", () => {
   els.script.value = "";
   els.srt.value = "";
+  els.anchors.value = "";
   els.summary.classList.add("hidden");
   els.resultWrap.classList.add("hidden");
   setStatus("", false);
@@ -91,6 +93,17 @@ function costClass(status, cost) {
 
 let lastRequest = null;
 
+// 解析「行:块」锚点输入：多对以逗号/分号/空格分隔，冒号支持全角
+function parseAnchors(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  return trimmed.split(/[\s,;，；、]+/).filter(Boolean).map((tok) => {
+    const m = tok.match(/^(\d+)\s*[:：]\s*(\d+)$/);
+    if (!m) throw new Error(`锚点「${tok}」格式应为 行:块，如 3:3`);
+    return { script: Number(m[1]), srt: Number(m[2]) };
+  });
+}
+
 function render(data) {
   const s = data.summary;
   $("cntMatch").textContent = s.match;
@@ -100,20 +113,30 @@ function render(data) {
   $("totalCost").textContent = s.total_cost.toFixed(4);
   $("avgCost").textContent =
     s.avg_match_cost === null ? "-" : s.avg_match_cost.toFixed(4);
+  const chipAnchor = $("chipAnchor");
+  if (s.anchors) {
+    $("cntAnchor").textContent = s.anchors;
+    chipAnchor.classList.remove("hidden");
+  } else {
+    chipAnchor.classList.add("hidden");
+  }
 
   const frag = document.createDocumentFragment();
   for (const r of data.rows) {
     const meta = STATUS_META[r.status];
     const tr = document.createElement("tr");
-    tr.className = `row-${r.status}`;
+    tr.className = `row-${r.status}` + (r.anchor ? " row-anchor" : "");
     const costText = r.status === "match"
       ? r.cost.toFixed(3)
       : `(${r.cost.toFixed(2)})`;
     const tc = r.start_tc
       ? `${escapeHtml(r.start_tc)} → ${escapeHtml(r.end_tc)}`
       : "";
+    const anchorBadge = r.anchor
+      ? '<span class="badge badge-anchor">锚点</span>'
+      : "";
     tr.innerHTML = `
-      <td><span class="badge ${meta.badge}">${meta.label}</span></td>
+      <td><span class="badge ${meta.badge}">${meta.label}</span>${anchorBadge}</td>
       <td class="cell-num ${costClass(r.status, r.cost)}">${costText}</td>
       <td class="cell-idx">${r.script_index ?? ""}</td>
       <td class="cell-text">${escapeHtml(r.script_text)}</td>
@@ -133,7 +156,15 @@ async function align() {
     setStatus("跳过代价需为 0~1 之间的数字", true);
     return;
   }
+  let anchors;
+  try {
+    anchors = parseAnchors(els.anchors.value);
+  } catch (e) {
+    setStatus(e.message, true);
+    return;
+  }
   lastRequest = { script: els.script.value, srt: els.srt.value, gap_cost: gap };
+  if (anchors.length) lastRequest.anchors = anchors;
 
   els.alignBtn.disabled = true;
   setStatus("对齐中……", false);

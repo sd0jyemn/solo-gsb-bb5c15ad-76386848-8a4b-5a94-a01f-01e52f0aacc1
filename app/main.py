@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .alignment import GAP_COST, align
+from .alignment import GAP_COST, align, align_with_anchors, normalize_anchors
 from .parsers import parse_script, parse_srt
 from .textnorm import normalize_text
 
@@ -23,13 +23,26 @@ STATIC_DIR = BASE_DIR / "static"
 app = FastAPI(title="字幕校稿对齐", version="1.0.0")
 
 
+class Anchor(BaseModel):
+    script: int = Field(description="对白稿行序位（解析后非空行，从 1 开始）")
+    srt: int = Field(description="SRT 块序位（解析后字幕块，从 1 开始）")
+
+
 class AlignRequest(BaseModel):
     script: str = Field(default="", description="逐行对白稿")
     srt: str = Field(default="", description="SRT 字幕")
     gap_cost: float = Field(default=GAP_COST, ge=0.0, le=1.0)
+    anchors: list[Anchor] | None = Field(
+        default=None, description="人工锚点：强制配对的 行:块 序位对"
+    )
 
 
-def _build_rows(script_text: str, srt_text: str, gap_cost: float):
+def _build_rows(
+    script_text: str,
+    srt_text: str,
+    gap_cost: float,
+    anchors: list[Anchor] | None = None,
+):
     if len(script_text.encode("utf-8", errors="ignore")) > MAX_RAW_BYTES:
         raise HTTPException(400, "对白稿超过 2 MB 大小限制")
     if len(srt_text.encode("utf-8", errors="ignore")) > MAX_RAW_BYTES:
@@ -53,13 +66,24 @@ def _build_rows(script_text: str, srt_text: str, gap_cost: float):
 
     norms_s = [normalize_text(it.raw_text) for it in scripts]
     norms_t = [normalize_text(it.raw_text) for it in subs]
-    ops = align(norms_s, norms_t, gap_cost=gap_cost)
+
+    anchor_pairs: list[tuple[int, int]] = []
+    if anchors:
+        try:
+            anchor_pairs = normalize_anchors(
+                [(a.script, a.srt) for a in anchors], len(scripts), len(subs)
+            )
+        except ValueError as exc:
+            raise HTTPException(400, f"锚点无效：{exc}") from exc
+        ops = align_with_anchors(norms_s, norms_t, anchor_pairs, gap_cost=gap_cost)
+    else:
+        ops = align(norms_s, norms_t, gap_cost=gap_cost)
 
     rows = []
     totals = {"match": 0, "missing_script": 0, "missing_srt": 0}
     match_cost_sum = 0.0
     for op, cost, i, j in ops:
-        if op == "match":
+        if op in ("match", "anchor"):
             s, t = scripts[i], subs[j]
             row = {
                 "status": "match",
@@ -71,6 +95,9 @@ def _build_rows(script_text: str, srt_text: str, gap_cost: float):
                 "start_tc": t.start_tc,
                 "end_tc": t.end_tc,
             }
+            if anchor_pairs:
+                # 仅锚点模式下输出该标记，未提供锚点时保持原有字段不变
+                row["anchor"] = op == "anchor"
             totals["match"] += 1
             match_cost_sum += cost
         elif op == "gap_a":
@@ -113,6 +140,8 @@ def _build_rows(script_text: str, srt_text: str, gap_cost: float):
         if totals["match"]
         else None,
     }
+    if anchor_pairs:
+        summary["anchors"] = len(anchor_pairs)
     return rows, summary
 
 
@@ -123,39 +152,42 @@ def health():
 
 @app.post("/api/align")
 def api_align(req: AlignRequest):
-    rows, summary = _build_rows(req.script, req.srt, req.gap_cost)
+    rows, summary = _build_rows(req.script, req.srt, req.gap_cost, req.anchors)
     return {"summary": summary, "rows": rows}
 
 
 @app.post("/api/export.csv")
 def api_export_csv(req: AlignRequest):
-    rows, _ = _build_rows(req.script, req.srt, req.gap_cost)
+    rows, _ = _build_rows(req.script, req.srt, req.gap_cost, req.anchors)
+    use_anchors = bool(req.anchors)
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(
-        [
-            "状态", "代价", "对白稿行号", "对白稿文本",
-            "SRT序号", "时间码入点", "时间码出点", "SRT文本",
-        ]
-    )
+    header = [
+        "状态", "代价", "对白稿行号", "对白稿文本",
+        "SRT序号", "时间码入点", "时间码出点", "SRT文本",
+    ]
+    if use_anchors:
+        header.append("锚点")
+    writer.writerow(header)
     status_label = {
         "match": "对位",
         "missing_script": "缺对白稿",
         "missing_srt": "缺字幕",
     }
     for r in rows:
-        writer.writerow(
-            [
-                status_label[r["status"]],
-                f"{r['cost']:.4f}",
-                r["script_index"] if r["script_index"] is not None else "",
-                r["script_text"],
-                r["srt_index"] if r["srt_index"] is not None else "",
-                r["start_tc"],
-                r["end_tc"],
-                r["srt_text"],
-            ]
-        )
+        values = [
+            status_label[r["status"]],
+            f"{r['cost']:.4f}",
+            r["script_index"] if r["script_index"] is not None else "",
+            r["script_text"],
+            r["srt_index"] if r["srt_index"] is not None else "",
+            r["start_tc"],
+            r["end_tc"],
+            r["srt_text"],
+        ]
+        if use_anchors:
+            values.append("锚点" if r.get("anchor") else "")
+        writer.writerow(values)
     # UTF-8 BOM，保证 Excel 直接打开中文不乱码
     data = "﻿".encode("utf-8") + buf.getvalue().encode("utf-8")
     return Response(

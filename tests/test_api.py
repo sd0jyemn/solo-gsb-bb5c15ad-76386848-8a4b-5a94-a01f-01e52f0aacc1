@@ -138,3 +138,147 @@ def test_csv_export():
     assert "状态,代价,对白稿行号" in text
     assert "对位" in text and "缺字幕" in text and "缺对白稿" in text
     assert "00:00:01,000" in text
+
+
+# ---------- 人工锚点 ----------
+
+ANCHOR_SCRIPT = "aaaaaaaaaa\n第二句\n第三句"
+ANCHOR_SRT = "\n".join(
+    [
+        "1",
+        "00:00:01,000 --> 00:00:02,000",
+        "bbbbbbbbbb",
+        "",
+        "2",
+        "00:00:03,000 --> 00:00:04,000",
+        "第二句",
+        "",
+        "3",
+        "00:00:05,000 --> 00:00:06,000",
+        "第三句",
+        "",
+    ]
+)
+
+
+def _align_with_anchors(anchors):
+    return client.post(
+        "/api/align",
+        json={"script": ANCHOR_SCRIPT, "srt": ANCHOR_SRT, "anchors": anchors},
+    )
+
+
+def test_anchor_forces_match_despite_distance():
+    # 第一条两侧文本完全不同（距离 1.0 > 2*gap），锚点仍强制对位
+    resp = _align_with_anchors([{"script": 1, "srt": 1}])
+    assert resp.status_code == 200
+    data = resp.json()
+    first = data["rows"][0]
+    assert first["status"] == "match"
+    assert first["anchor"] is True
+    assert first["cost"] == 1.0
+    assert first["script_index"] == 1 and first["srt_index"] == 1
+    # 其余行照常对齐，非锚点行 anchor 为 False，且索引为全局序位
+    rest = data["rows"][1:]
+    assert all(r["anchor"] is False for r in rest)
+    assert {r["status"] for r in rest} == {"match"}
+    assert [r["script_index"] for r in rest] == [2, 3]
+    assert [r["srt_index"] for r in rest] == [2, 3]
+    assert data["summary"]["anchors"] == 1
+
+
+def test_anchor_segments_keep_gaps():
+    # 锚点只强制自身配对，其余条目仍可出现双侧缺项
+    script = "稿里独有\n锚点句\n第四句"
+    srt = "\n".join(
+        [
+            "1",
+            "00:00:01,000 --> 00:00:02,000",
+            "差异很大",
+            "",
+            "2",
+            "00:00:03,000 --> 00:00:04,000",
+            "字幕独有",
+            "",
+            "3",
+            "00:00:05,000 --> 00:00:06,000",
+            "第四句",
+            "",
+        ]
+    )
+    resp = client.post(
+        "/api/align",
+        json={"script": script, "srt": srt, "anchors": [{"script": 2, "srt": 1}]},
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["rows"]
+    assert [r["status"] for r in rows] == [
+        "missing_srt", "match", "missing_script", "match",
+    ]
+    anchor_row = rows[1]
+    assert anchor_row["anchor"] is True
+    assert anchor_row["script_index"] == 2 and anchor_row["srt_index"] == 1
+    assert anchor_row["cost"] == 1.0  # 差异很大也不跳过
+
+
+def test_anchor_out_of_range_returns_400():
+    for anchors in (
+        [{"script": 0, "srt": 1}],
+        [{"script": 1, "srt": 0}],
+        [{"script": 4, "srt": 1}],   # 对白稿只有 3 行
+        [{"script": 1, "srt": 4}],   # SRT 只有 3 块
+    ):
+        resp = _align_with_anchors(anchors)
+        assert resp.status_code == 400
+        assert "锚点" in resp.json()["detail"]
+        assert "超出范围" in resp.json()["detail"]
+
+
+def test_anchor_duplicate_returns_400():
+    resp = _align_with_anchors(
+        [{"script": 1, "srt": 1}, {"script": 1, "srt": 1}]
+    )
+    assert resp.status_code == 400
+    assert "重复" in resp.json()["detail"]
+
+
+def test_anchor_crossing_returns_400():
+    resp = _align_with_anchors(
+        [{"script": 1, "srt": 2}, {"script": 2, "srt": 1}]
+    )
+    assert resp.status_code == 400
+    assert "交叉" in resp.json()["detail"]
+    # 两列都必须严格递增：仅一列递增也算交叉
+    resp = _align_with_anchors(
+        [{"script": 1, "srt": 1}, {"script": 1, "srt": 2}]
+    )
+    assert resp.status_code == 400
+
+
+def test_anchor_csv_marks_anchor_rows():
+    resp = client.post(
+        "/api/export.csv",
+        json={
+            "script": ANCHOR_SCRIPT,
+            "srt": ANCHOR_SRT,
+            "anchors": [{"script": 1, "srt": 1}],
+        },
+    )
+    assert resp.status_code == 200
+    text = resp.content.decode("utf-8-sig")
+    header = text.splitlines()[0]
+    assert header.endswith(",锚点")
+    # 锚点行末列标记「锚点」，其余行为空
+    lines = text.splitlines()[1:]
+    assert lines[0].endswith(",锚点")
+    assert all(not ln.endswith(",锚点") for ln in lines[1:])
+
+
+def test_no_anchor_keeps_original_shape():
+    # 未提供锚点时：行无 anchor 字段、summary 无 anchors、CSV 无锚点列
+    data = _align()
+    assert all("anchor" not in r for r in data["rows"])
+    assert "anchors" not in data["summary"]
+    resp = client.post("/api/export.csv", json={"script": SCRIPT, "srt": SRT})
+    header = resp.content.decode("utf-8-sig").splitlines()[0]
+    assert "锚点" not in header

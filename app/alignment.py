@@ -3,6 +3,7 @@
 - 对角线代价：两条目归一化文本的归一化字符编辑距离（0~1）
 - 跳过任一条目代价：固定 0.45（可由调用方覆盖）
 - 两侧条目各最多匹配一次，允许缺项；结果关于序列顺序全局单调
+- 支持人工锚点：锚点强制配对，相邻锚点之间仍按常规最低代价对齐
 
 优先使用 rapidfuzz(C++) 批量计算距离矩阵 + numpy 向量化 DP；
 缺少 numpy 时自动回退到纯 Python 实现。
@@ -193,3 +194,76 @@ def align(
     if _HAVE_NUMPY:
         return _align_numpy(norms_a, norms_b, gap_cost)
     return _align_python(norms_a, norms_b, gap_cost)
+
+
+def normalize_anchors(
+    anchors: list[tuple[int, int]],
+    n: int,
+    m: int,
+) -> list[tuple[int, int]]:
+    """校验人工锚点并把 1 起始序位转换为 0 起始索引对。
+
+    anchors 为 (对白稿行序位, SRT 块序位)，序位均指解析后条目的顺序
+    位置（1..n / 1..m）。要求两列均严格递增；越界、重复或交叉
+    （顺序颠倒）时抛出 ValueError，由接口层转成 400。
+    """
+    out: list[tuple[int, int]] = []
+    prev_a = prev_b = 0
+    for k, (a, b) in enumerate(anchors, 1):
+        if not 1 <= a <= n:
+            raise ValueError(
+                f"第 {k} 个锚点的对白稿行序位 {a} 超出范围 1~{n}"
+            )
+        if not 1 <= b <= m:
+            raise ValueError(
+                f"第 {k} 个锚点的 SRT 块序位 {b} 超出范围 1~{m}"
+            )
+        if a == prev_a and b == prev_b:
+            raise ValueError(f"第 {k} 个锚点 ({a}:{b}) 与前一锚点重复")
+        if a <= prev_a or b <= prev_b:
+            raise ValueError(
+                f"第 {k} 个锚点 ({a}:{b}) 与前一锚点 ({prev_a}:{prev_b}) "
+                "交叉：两列序位必须同时严格递增"
+            )
+        prev_a, prev_b = a, b
+        out.append((a - 1, b - 1))
+    return out
+
+
+def align_with_anchors(
+    norms_a: list[str],
+    norms_b: list[str],
+    anchors: list[tuple[int, int]],
+    gap_cost: float = GAP_COST,
+) -> Ops:
+    """带人工锚点的分段对齐。
+
+    anchors 为 0 起始、两列均严格递增的 (i, j) 索引对（先经
+    normalize_anchors 校验转换）。相邻锚点之间（含首锚点之前、
+    末锚点之后）的片段各自做常规最低代价单调对齐，锚点本身作为
+    强制配对（op 为 "anchor"）按顺序拼接——即使两侧文本差异很大
+    也绝不跳过；其余条目仍可能表现为双侧缺项。
+    """
+    ops: Ops = []
+    ai = bj = 0
+    for i, j in anchors:
+        ops.extend(_offset_ops(align(norms_a[ai:i], norms_b[bj:j], gap_cost), ai, bj))
+        ops.append(
+            ("anchor", normalized_distance(norms_a[i], norms_b[j]), i, j)
+        )
+        ai, bj = i + 1, j + 1
+    ops.extend(_offset_ops(align(norms_a[ai:], norms_b[bj:], gap_cost), ai, bj))
+    return ops
+
+
+def _offset_ops(ops: Ops, di: int, dj: int) -> Ops:
+    """把分段对齐结果中的段内索引平移为全局索引。"""
+    return [
+        (
+            op,
+            cost,
+            i + di if i is not None else None,
+            j + dj if j is not None else None,
+        )
+        for op, cost, i, j in ops
+    ]
