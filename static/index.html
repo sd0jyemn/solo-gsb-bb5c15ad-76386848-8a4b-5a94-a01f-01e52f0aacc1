@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>字幕校稿对齐</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>字幕校稿对齐</h1>
+  <p class="subtitle">逐行对白稿 × SRT · 归一化字符编辑距离全局单调对齐 · 缺项代价 0.45</p>
+</header>
+
+<main>
+  <section class="input-grid">
+    <div class="pane">
+      <div class="pane-head">
+        <label for="script">逐行对白稿（每行一句）</label>
+        <button type="button" class="ghost" id="sampleScript">填入示例</button>
+      </div>
+      <textarea id="script" spellcheck="false"
+        placeholder="粘贴逐行对白稿，每行一条&#10;例如：&#10;你好世界&#10;今天天气真好"></textarea>
+    </div>
+    <div class="pane">
+      <div class="pane-head">
+        <label for="srt">SRT 字幕（保留时间码）</label>
+        <button type="button" class="ghost" id="sampleSrt">填入示例</button>
+      </div>
+      <textarea id="srt" spellcheck="false"
+        placeholder="粘贴标准 SRT&#10;1&#10;00:00:01,000 --> 00:00:03,000&#10;你好，世界！"></textarea>
+    </div>
+  </section>
+
+  <section class="controls">
+    <label class="gap-field">跳过单条代价
+      <input type="number" id="gapCost" value="0.45" min="0" max="1" step="0.01">
+    </label>
+    <button type="button" id="alignBtn" class="primary">开始对齐</button>
+    <button type="button" id="clearBtn" class="ghost">清空</button>
+    <span id="status" class="status" role="status"></span>
+  </section>
+
+  <section id="summary" class="summary hidden">
+    <span class="chip chip-match">对位 <b id="cntMatch">0</b></span>
+    <span class="chip chip-missing-script">缺对白稿 <b id="cntMissingScript">0</b></span>
+    <span class="chip chip-missing-srt">缺字幕 <b id="cntMissingSrt">0</b></span>
+    <span class="chip">总行数 <b id="cntTotal">0</b></span>
+    <span class="chip">总代价 <b id="totalCost">0</b></span>
+    <span class="chip">对位平均代价 <b id="avgCost">-</b></span>
+    <button type="button" id="downloadBtn" class="ghost">下载 CSV</button>
+  </section>
+
+  <section id="resultWrap" class="result-wrap hidden">
+    <table id="resultTable">
+      <thead>
+        <tr>
+          <th class="col-status">状态</th>
+          <th class="col-cost">代价</th>
+          <th class="col-script">#</th>
+          <th class="col-script-text">对白稿</th>
+          <th class="col-srt">#</th>
+          <th class="col-tc">时间码</th>
+          <th class="col-srt-text">SRT 字幕</th>
+        </tr>
+      </thead>
+      <tbody id="resultBody"></tbody>
+    </table>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
